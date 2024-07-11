@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"github.com/rs/zerolog/log"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 )
 
 type (
 	EndpointRequest struct {
-		ClientId int64  `json:"clientId" yaml:"clientId"`
-		Endpoint string `json:"endpoint" yaml:"endpoint"`
+		ClientId     int64  `json:"clientId" yaml:"clientId"`
+		Endpoint     string `json:"endpoint" yaml:"endpoint"`
+		requestError error
 	}
 
 	RequestError struct {
@@ -22,10 +24,11 @@ type (
 	}
 
 	HttpMonitor struct {
+		lock            sync.Mutex
 		cancel          context.CancelFunc
-		requests        []EndpointRequest
+		requests        []*EndpointRequest
 		amountOfWorkers int
-		workerChannel   chan EndpointRequest
+		workerChannel   chan *EndpointRequest
 		errorChannel    chan<- RequestError
 	}
 )
@@ -34,27 +37,61 @@ func NewHttpMonitor(amountOfWorkers int, errorChannel chan<- RequestError) *Http
 	monitor := new(HttpMonitor)
 
 	monitor.amountOfWorkers = amountOfWorkers
-	monitor.requests = make([]EndpointRequest, 0, amountOfWorkers)
-	monitor.workerChannel = make(chan EndpointRequest, amountOfWorkers)
+	monitor.requests = make([]*EndpointRequest, 0, amountOfWorkers)
+	monitor.workerChannel = make(chan *EndpointRequest, amountOfWorkers)
 	monitor.errorChannel = errorChannel
 
 	return monitor
 }
 
-func (m *HttpMonitor) RequestExists(endpoint EndpointRequest) bool {
-	index := slices.IndexFunc(m.requests, func(r EndpointRequest) bool {
-		return r.ClientId == endpoint.ClientId && r.Endpoint == r.Endpoint
+func (m *HttpMonitor) requestIndex(endpoint EndpointRequest) int {
+	index := slices.IndexFunc(m.requests, func(r *EndpointRequest) bool {
+		return r.ClientId == endpoint.ClientId && r.Endpoint == endpoint.Endpoint
 	})
-	return index != -1
+	return index
 }
 
-func (m *HttpMonitor) AddRequest(request EndpointRequest) {
+func (m *HttpMonitor) RequestExists(endpoint EndpointRequest) bool {
+	return m.requestIndex(endpoint) != -1
+}
+
+func (m *HttpMonitor) AddRequest(request *EndpointRequest) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 	m.requests = append(m.requests, request)
+}
+
+func (m *HttpMonitor) RemoveRequest(request EndpointRequest) bool {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	index := m.requestIndex(request)
+	if index == -1 {
+		return false
+	}
+
+	m.requests[index] = m.requests[len(m.requests)-1]
+	m.requests = m.requests[:len(m.requests)-1]
+
+	return true
+}
+
+func (m *HttpMonitor) ListRequests(client int64) []*EndpointRequest {
+	clientRequests := make([]*EndpointRequest, 0, 10)
+	for _, r := range m.requests {
+		if r.ClientId == client {
+			clientRequests = append(clientRequests, r)
+		}
+	}
+
+	return clientRequests
 }
 
 func (m *HttpMonitor) StartMonitor() {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+
+	log.Info().Int("amount", m.amountOfWorkers).Msg("starting monitor workers")
+
 	for id := 0; id < m.amountOfWorkers; id++ {
 		go monitorWorker(ctx, id, m.workerChannel, m.errorChannel)
 	}
@@ -78,19 +115,30 @@ func (m *HttpMonitor) StopMonitor() {
 	close(m.workerChannel)
 }
 
-func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan EndpointRequest, updateChannel chan<- RequestError) {
-	slog.Info("worker is starting", "workerId", workerId)
+func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *EndpointRequest, updateChannel chan<- RequestError) {
+	log.Info().Int("workerId", workerId).Msg("worker is starting")
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("stopping worker", "workerId", workerId)
+			log.Info().Int("workerId", workerId).Msg("stopping worker")
 			return
 		case r := <-workerChannel:
 			err := checkLiveliness(r.Endpoint)
-			updateChannel <- RequestError{
-				EndpointRequest: r,
-				Error:           err,
+			if err != nil {
+				if r.requestError != nil {
+					continue
+				}
+				r.requestError = err
+				updateChannel <- RequestError{
+					EndpointRequest: *r,
+					Error:           err,
+				}
+				continue
+			}
+
+			if r.requestError != nil {
+				r.requestError = nil
 			}
 		}
 	}
