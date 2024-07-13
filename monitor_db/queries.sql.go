@@ -10,7 +10,7 @@ import (
 )
 
 const getAllRequests = `-- name: GetAllRequests :many
-select clientid, endpoint from requests
+select clientid, endpoint from requests order by clientId
 `
 
 func (q *Queries) GetAllRequests(ctx context.Context) ([]Request, error) {
@@ -36,8 +36,35 @@ func (q *Queries) GetAllRequests(ctx context.Context) ([]Request, error) {
 	return items, nil
 }
 
+const getClientEndpointByIndex = `-- name: GetClientEndpointByIndex :one
+select clientid, endpoint from requests where clientId = ? order by endpoint limit 1 offset ?
+`
+
+type GetClientEndpointByIndexParams struct {
+	Clientid int64
+	Offset   int64
+}
+
+func (q *Queries) GetClientEndpointByIndex(ctx context.Context, arg GetClientEndpointByIndexParams) (Request, error) {
+	row := q.db.QueryRowContext(ctx, getClientEndpointByIndex, arg.Clientid, arg.Offset)
+	var i Request
+	err := row.Scan(&i.Clientid, &i.Endpoint)
+	return i, err
+}
+
+const getClientEndpointsAmount = `-- name: GetClientEndpointsAmount :one
+select count(*) from requests where clientId = ?
+`
+
+func (q *Queries) GetClientEndpointsAmount(ctx context.Context, clientid int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getClientEndpointsAmount, clientid)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getRequestsByClientId = `-- name: GetRequestsByClientId :many
-select clientid, endpoint from requests where clientId = ?
+select clientid, endpoint from requests where clientId = ? order by endpoint
 `
 
 func (q *Queries) GetRequestsByClientId(ctx context.Context, clientid int64) ([]Request, error) {

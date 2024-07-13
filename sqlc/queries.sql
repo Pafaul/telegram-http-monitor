@@ -5,7 +5,13 @@ insert into requests (clientId, endpoint) values (?, ?);
 delete from requests where clientId = ? and endpoint = ?;
 
 -- name: GetRequestsByClientId :many
-select * from requests where clientId = ?;
+select * from requests where clientId = ? order by endpoint;
 
 -- name: GetAllRequests :many
-select * from requests;
+select * from requests order by clientId;
+
+-- name: GetClientEndpointByIndex :one
+select * from requests where clientId = ? order by endpoint limit 1 offset ?;
+
+-- name: GetClientEndpointsAmount :one
+select count(*) from requests where clientId = ?;
