@@ -6,3 +6,6 @@ run-docker-image:
 
 run:
 	go run pafaul/telegram-http-monitor
+
+gen-db:
+	sqlc generate

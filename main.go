@@ -3,25 +3,29 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	tele "gopkg.in/telebot.v3"
 	"gopkg.in/yaml.v3"
 	"os"
 	"os/signal"
+	"pafaul/telegram-http-monitor/monitor_db"
 )
 
 type (
 	Config struct {
-		Token   string `yaml:"token"`
-		Monitor struct {
+		Token    string `yaml:"token"`
+		SqliteDB string `yaml:"sqliteDB"`
+		Monitor  struct {
 			AmountOfWorkers int `yaml:"amountOfWorkers"`
 		} `yaml:"monitor"`
 	}
 )
 
 var (
-	httpMonitor  *HttpMonitor
 	errorChannel = make(chan RequestError)
 )
 
@@ -34,38 +38,37 @@ func main() {
 
 	setupLogger(config)
 
-	httpMonitor = NewHttpMonitor(config.Monitor.AmountOfWorkers, errorChannel)
+	db, err := openDBConnection(config)
+	if err != nil {
+		log.Error().Err(err).Msg("open db error")
+	}
+	defer db.Close()
+	q := monitor_db.New(db)
 
-	bot, botErr := NewBot(config)
+	httpMonitor := NewHttpMonitor(config.Monitor.AmountOfWorkers, errorChannel)
+
+	bot, botErr := NewBot(config, httpMonitor, q)
 	if botErr != nil {
 		log.Error().Err(botErr).Msg("could not start bot")
 		os.Exit(1)
 	}
 
+	cancel := start(bot, httpMonitor, q)
+
 	sigKill := make(chan os.Signal, 1)
 	signal.Notify(sigKill, os.Interrupt)
-
 	blocker := make(chan int)
-
-	senderCtx, senderCancel := context.WithCancel(context.Background())
-
-	go bot.Start()
-	go httpMonitor.StartMonitor()
-	go SendErrorsToClients(senderCtx, bot, errorChannel)
-
 	go func() {
 		select {
 		case s := <-sigKill:
-			senderCancel()
+			cancel()
 			log.Warn().Str("signal", s.String()).Msg("sigkill received")
 			log.Info().Msg("stopping bot")
 			bot.Stop()
-			log.Info().Msg("bot is stopped")
 
 			log.Info().Msg("stopping http monitor")
 			httpMonitor.StopMonitor()
 			close(errorChannel)
-			log.Info().Msg("http monitor is stopped")
 
 			blocker <- 1
 		}
@@ -95,6 +98,10 @@ func loadConfig(configFile string) (*Config, error) {
 		return nil, errors.New("token in config file is missing")
 	}
 
+	if len(config.SqliteDB) == 0 {
+		return nil, errors.New("sqlite db file is missing")
+	}
+
 	if config.Monitor.AmountOfWorkers == 0 {
 		config.Monitor.AmountOfWorkers = 1
 	}
@@ -108,4 +115,29 @@ func setupLogger(_ *Config) {
 		With().
 		Timestamp().
 		Logger()
+}
+
+func openDBConnection(config *Config) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", config.SqliteDB)
+	if err != nil {
+		log.Error().Err(err).Msg("connecting to db error")
+		return nil, err
+	}
+	pingErr := db.Ping()
+	if pingErr != nil {
+		log.Error().Err(err).Msg("sqlite db ping")
+		return nil, pingErr
+	}
+
+	return db, nil
+}
+
+func start(bot *tele.Bot, httpMonitor *HttpMonitor, q *monitor_db.Queries) context.CancelFunc {
+	senderCtx, cancel := context.WithCancel(context.Background())
+
+	go bot.Start()
+	go httpMonitor.StartMonitor(q)
+	go SendErrorsToClients(senderCtx, bot, errorChannel)
+
+	return cancel
 }

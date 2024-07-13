@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"github.com/rs/zerolog/log"
 	"slices"
 	"sync"
 )
@@ -25,17 +27,31 @@ func NewRequestIterator(numberOfElements int) *RequestIterator {
 	return ri
 }
 
-func (ri *RequestIterator) Next() *EndpointRequest {
+// Start
+// Iterator must be started as a goroutine so the iterator
+// can send values over a blocking channel.
+//
+// In this case iterator will function as a classic iterator,
+// next value will not be handled over the channel until
+// the previous one is read
+func (ri *RequestIterator) Start(ctx context.Context) {
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		ri.lock.RLock()
 		if len(ri.requests) == 0 {
 			continue
 		}
 
-		ri.lock.RLock()
 		if ri.currentIndex >= len(ri.requests) {
 			ri.currentIndex = 0
 		}
 
+		log.Info().Str("endpoint", ri.requests[ri.currentIndex].Endpoint).Msg("adding to receive channel")
 		ri.ReceiveChannel <- ri.requests[ri.currentIndex]
 		ri.lock.RUnlock()
 
@@ -46,18 +62,18 @@ func (ri *RequestIterator) Next() *EndpointRequest {
 func (ri *RequestIterator) Add(request *EndpointRequest) {
 	ri.lock.Lock()
 	defer ri.lock.Unlock()
-	if ri.requestExists(request) {
+	if ri.RequestExists(request) {
 		return
 	}
 
 	ri.requests = append(ri.requests, request)
 }
 
-func (ri *RequestIterator) Remove(request *EndpointRequest) {
+func (ri *RequestIterator) Remove(request *EndpointRequest) bool {
 	ri.lock.Lock()
 	defer ri.lock.Unlock()
-	if !ri.requestExists(request) {
-		return
+	if !ri.RequestExists(request) {
+		return false
 	}
 
 	if len(ri.requests) == 1 {
@@ -67,6 +83,8 @@ func (ri *RequestIterator) Remove(request *EndpointRequest) {
 	indexToRemove := ri.indexOf(request)
 	ri.requests[indexToRemove], ri.requests[len(ri.requests)-1] = ri.requests[len(ri.requests)-1], ri.requests[indexToRemove]
 	ri.requests = ri.requests[:len(ri.requests)-1]
+
+	return true
 }
 
 func (ri *RequestIterator) indexOf(request *EndpointRequest) int {
@@ -76,6 +94,6 @@ func (ri *RequestIterator) indexOf(request *EndpointRequest) int {
 	return index
 }
 
-func (ri *RequestIterator) requestExists(request *EndpointRequest) bool {
+func (ri *RequestIterator) RequestExists(request *EndpointRequest) bool {
 	return ri.indexOf(request) != -1
 }

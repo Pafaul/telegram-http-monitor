@@ -2,3 +2,4 @@ config.yaml
 .idea
 telegram-http-monitor
 monitor
+db.sqlite

@@ -6,6 +6,7 @@ import (
 	"github.com/rs/zerolog/log"
 	tele "gopkg.in/telebot.v3"
 	"net/url"
+	"pafaul/telegram-http-monitor/monitor_db"
 	"strings"
 	"time"
 )
@@ -21,7 +22,12 @@ var (
 	}
 )
 
-func NewBot(config *Config) (*tele.Bot, error) {
+var (
+	_httpMonitor *HttpMonitor
+	_q           *monitor_db.Queries
+)
+
+func NewBot(config *Config, monitor *HttpMonitor, q *monitor_db.Queries) (*tele.Bot, error) {
 	botSettings := tele.Settings{
 		Token:  config.Token,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
@@ -40,7 +46,11 @@ func NewBot(config *Config) (*tele.Bot, error) {
 		return nil, botErr
 	}
 
+	setupBotMiddleware(bot)
 	setupBotHandlers(bot)
+
+	_httpMonitor = monitor
+	_q = q
 
 	return bot, nil
 }
@@ -49,25 +59,18 @@ func setupBotCommands(bot *tele.Bot) error {
 	return bot.SetCommands(commands)
 }
 
+func setupBotMiddleware(_ *tele.Bot) {
+	return
+}
+
 func setupBotHandlers(bot *tele.Bot) {
-	bot.Handle("/start", func(c tele.Context) error {
-		return sendHelp(c)
-	})
-	bot.Handle("/add", func(c tele.Context) error {
-		return addEndpointToMonitor(c)
-	})
-	bot.Handle("/remove", func(c tele.Context) error {
-		return removeMonitoredEndpoint(c)
-	})
-	bot.Handle("/list", func(c tele.Context) error {
-		return listMonitoredEndpoints(c)
-	})
-	bot.Handle("/unsubscribe", func(c tele.Context) error {
-		return sendHelp(c)
-	})
-	bot.Handle("/help", func(c tele.Context) error {
-		return sendHelp(c)
-	})
+	bot.Handle("/start", sendHelp)
+	bot.Handle("/add", addEndpointToMonitor)
+	bot.Handle("/remove", removeMonitoredEndpoint)
+	bot.Handle("/list", listMonitoredEndpoints)
+	bot.Handle("/unsubscribe", sendHelp)
+	bot.Handle("/help", sendHelp)
+	bot.Handle("/help", nil)
 }
 
 func sendHelp(c tele.Context) error {
@@ -98,17 +101,36 @@ func addEndpointToMonitor(c tele.Context) error {
 		ClientId: c.Sender().ID,
 	}
 
-	if httpMonitor.RequestExists(*request) {
+	err := _q.InsertRequest(context.Background(), monitor_db.InsertRequestParams{
+		Clientid: request.ClientId,
+		Endpoint: request.Endpoint,
+	})
+	if err != nil {
+		log.Error().Int64("clientId", request.ClientId).Err(err).Msg("add request")
+	}
+
+	if _httpMonitor.RequestExists(request) {
 		return c.Send(fmt.Sprintf("url %s is already being monitored", urlToAdd))
 	}
 
-	httpMonitor.AddRequest(request)
+	_httpMonitor.AddRequest(request)
 
 	return c.Send(fmt.Sprintf("Endpoint %s added to monitoring", urlToAdd))
 }
 
 func listMonitoredEndpoints(c tele.Context) error {
-	clientRequests := httpMonitor.ListRequests(c.Sender().ID)
+	clientId := c.Sender().ID
+	dbRequests, err := _q.GetRequestsByClientId(context.Background(), clientId)
+	if err != nil {
+		log.Error().Int64("clientId", clientId).Err(err).Msg("list requests")
+		return nil
+	}
+
+	clientRequests := make([]EndpointRequest, len(dbRequests))
+	for i, r := range dbRequests {
+		clientRequests[i] = EndpointRequest{Endpoint: r.Endpoint, ClientId: clientId}
+	}
+
 	if len(clientRequests) == 0 {
 		return c.Send("client has no active requests")
 	}
@@ -132,7 +154,17 @@ func removeMonitoredEndpoint(c tele.Context) error {
 		return c.Send(fmt.Sprintf("error parsing provided uri: %s", err.Error()))
 	}
 
-	removed := httpMonitor.RemoveRequest(EndpointRequest{Endpoint: urlToRemove, ClientId: c.Sender().ID})
+	request := &EndpointRequest{Endpoint: urlToRemove, ClientId: c.Sender().ID}
+
+	err := _q.RemoveRequest(context.Background(), monitor_db.RemoveRequestParams{
+		Clientid: request.ClientId,
+		Endpoint: request.Endpoint,
+	})
+	if err != nil {
+		log.Error().Int64("clientId", request.ClientId).Err(err).Msg("remove request")
+	}
+
+	removed := _httpMonitor.RemoveRequest(request)
 	if !removed {
 		return c.Send(fmt.Sprintf("could not find requested endpoint: %s", urlToRemove))
 	}
