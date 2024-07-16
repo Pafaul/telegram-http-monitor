@@ -4,6 +4,9 @@ build-docker-image:
 run-docker-image:
 	docker run -v ./config.yaml:/app/config.yaml telegram-http-monitor:latest
 
+build:
+	go build -race pafaul/telegram-http-monitor
+
 run:
 	go run pafaul/telegram-http-monitor
 

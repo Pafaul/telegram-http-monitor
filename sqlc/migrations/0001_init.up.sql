@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS requests
+CREATE TABLE requests
 (
     clientId int not null,
     endpoint text not null,

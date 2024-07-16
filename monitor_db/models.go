@@ -4,7 +4,26 @@
 
 package monitor_db
 
+import (
+	"database/sql"
+)
+
+type Client struct {
+	Clientid int64
+}
+
 type Request struct {
 	Clientid int64
 	Endpoint string
+}
+
+type UrlsToRequest struct {
+	ID  int64
+	Url string
+}
+
+type UserUrlSubscription struct {
+	ID       int64
+	Clientid sql.NullInt64
+	Urlid    sql.NullInt64
 }
