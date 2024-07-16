@@ -11,6 +11,6 @@ CREATE TABLE user_url_subscription(
     id INTEGER PRIMARY KEY,
     clientId INTEGER,
     urlId INTEGER,
-    FOREIGN KEY (clientId) REFERENCES clients(clientId),
-    FOREIGN KEY (urlId) REFERENCES urls_to_request(id)
+    FOREIGN KEY (clientId) REFERENCES clients(clientId) on delete cascade,
+    FOREIGN KEY (urlId) REFERENCES urls_to_request(id) on delete cascade
 );

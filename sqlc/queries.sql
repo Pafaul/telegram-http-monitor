@@ -15,3 +15,15 @@ select * from requests where clientId = ? order by endpoint limit 1 offset ?;
 
 -- name: GetClientEndpointsAmount :one
 select count(*) from requests where clientId = ?;
+
+-- name: GetEndpointsToMonitor :many
+select * from urls_to_request;
+
+-- name: GetUsersToNotify :many
+select clients.clientId
+    from user_url_subscription
+        inner join clients on clients.clientId = user_url_subscription.clientId
+    where user_url_subscription.urlId = ?;
+
+-- name: RemoveClient :exec
+delete from clients where clientId = ?;

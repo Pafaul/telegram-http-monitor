@@ -12,3 +12,9 @@ run:
 
 gen-db:
 	sqlc generate
+
+migrate-up:
+	migrate -source file://sqlc/migrations -database sqlite3://db.sqlite up
+
+migrate-down:
+	migrate -source file://sqlc/migrations -database sqlite3://db.sqlite down

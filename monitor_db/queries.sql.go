@@ -7,6 +7,7 @@ package monitor_db
 
 import (
 	"context"
+	"database/sql"
 )
 
 const getAllRequests = `-- name: GetAllRequests :many
@@ -63,6 +64,33 @@ func (q *Queries) GetClientEndpointsAmount(ctx context.Context, clientid int64) 
 	return count, err
 }
 
+const getEndpointsToMonitor = `-- name: GetEndpointsToMonitor :many
+select id, url from urls_to_request
+`
+
+func (q *Queries) GetEndpointsToMonitor(ctx context.Context) ([]UrlsToRequest, error) {
+	rows, err := q.db.QueryContext(ctx, getEndpointsToMonitor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UrlsToRequest
+	for rows.Next() {
+		var i UrlsToRequest
+		if err := rows.Scan(&i.ID, &i.Url); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getRequestsByClientId = `-- name: GetRequestsByClientId :many
 select clientid, endpoint from requests where clientId = ? order by endpoint
 `
@@ -80,6 +108,36 @@ func (q *Queries) GetRequestsByClientId(ctx context.Context, clientid int64) ([]
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getUsersToNotify = `-- name: GetUsersToNotify :many
+select clients.clientId
+    from user_url_subscription
+        inner join clients on clients.clientId = user_url_subscription.clientId
+    where user_url_subscription.urlId = ?
+`
+
+func (q *Queries) GetUsersToNotify(ctx context.Context, urlid sql.NullInt64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, getUsersToNotify, urlid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var clientid int64
+		if err := rows.Scan(&clientid); err != nil {
+			return nil, err
+		}
+		items = append(items, clientid)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
