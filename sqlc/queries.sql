@@ -1,29 +1,38 @@
--- name: InsertRequest :exec
-insert into requests (clientId, endpoint) values (?, ?);
+-- name: AddClient :exec
+insert into clients(clientId) values(?) on conflict do nothing;
 
--- name: RemoveRequest :exec
-delete from requests where clientId = ? and endpoint = ?;
+-- name: RemoveClient :exec
+delete from clients where clientId = ?;
 
--- name: GetRequestsByClientId :many
-select * from requests where clientId = ? order by endpoint;
+-- name: GetUrlIdToTrack :one
+select id from urls_to_request where url = ?;
 
--- name: GetAllRequests :many
-select * from requests order by clientId;
+-- name: AddUrlToTrack :one
+insert into urls_to_request(url) values (?) returning id;
 
--- name: GetClientEndpointByIndex :one
-select * from requests where clientId = ? order by endpoint limit 1 offset ?;
-
--- name: GetClientEndpointsAmount :one
-select count(*) from requests where clientId = ?;
+-- name: RemoveUrlToTrack :exec
+delete from urls_to_request where url = ?;
 
 -- name: GetEndpointsToMonitor :many
 select * from urls_to_request;
 
 -- name: GetUsersToNotify :many
-select clients.clientId
-    from user_url_subscription
-        inner join clients on clients.clientId = user_url_subscription.clientId
-    where user_url_subscription.urlId = ?;
+select c.clientId
+from clients c
+inner join user_url_subscription uus on c.clientId = uus.clientId
+inner join urls_to_request ur on uus.urlId = ur.id
+where ur.url = ?;
 
--- name: RemoveClient :exec
-delete from clients where clientId = ?;
+-- name: GetUserMonitoredEndpoints :many
+select ur.url
+from urls_to_request ur
+inner join user_url_subscription uus on ur.id = uus.urlId
+inner join clients c on uus.clientId = c.clientId
+where c.clientId = ?
+order by uus.id;
+
+-- name: AddSubscription :exec
+insert into user_url_subscription (clientId, urlId) values (?, ?);
+
+-- name: RemoveSubscription :exec
+delete from user_url_subscription where clientId = ? and urlId = ?;

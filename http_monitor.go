@@ -13,7 +13,6 @@ import (
 
 type (
 	EndpointRequest struct {
-		ClientId     int64  `json:"clientId" yaml:"clientId"`
 		Endpoint     string `json:"endpoint" yaml:"endpoint"`
 		lock         sync.Locker
 		requestError error
@@ -29,7 +28,13 @@ type (
 		cancel          context.CancelFunc
 		amountOfWorkers int
 		workerChannel   chan *EndpointRequest
-		errorChannel    chan<- RequestError
+	}
+
+	IHttpMonitor interface {
+		StartMonitor(ctx context.Context, q *monitor_db.Queries, errorChannel chan<- RequestError)
+		AddRequest(request *EndpointRequest)
+		RemoveRequest(request *EndpointRequest) bool
+		RequestExists(request *EndpointRequest) bool
 	}
 )
 
@@ -37,27 +42,25 @@ var (
 	requestIterator *RequestIterator
 )
 
-func NewHttpMonitor(amountOfWorkers int, errorChannel chan<- RequestError) *HttpMonitor {
+func NewHttpMonitor(amountOfWorkers int) *HttpMonitor {
 	monitor := new(HttpMonitor)
 
 	monitor.amountOfWorkers = amountOfWorkers
 	monitor.workerChannel = make(chan *EndpointRequest, amountOfWorkers)
-	monitor.errorChannel = errorChannel
 
 	requestIterator = NewRequestIterator(amountOfWorkers)
 
 	return monitor
 }
 
-func (m *HttpMonitor) StartMonitor(q *monitor_db.Queries) {
+func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, errorChannel chan<- RequestError) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	requests, _ := q.GetAllRequests(context.Background())
+	requests, _ := q.GetEndpointsToMonitor(context.Background())
 	for _, r := range requests {
 		requestIterator.Add(&EndpointRequest{
-			ClientId:     r.Clientid,
-			Endpoint:     r.Endpoint,
+			Endpoint:     r.Url,
 			lock:         &sync.Mutex{},
 			requestError: nil,
 		})
@@ -68,7 +71,7 @@ func (m *HttpMonitor) StartMonitor(q *monitor_db.Queries) {
 	log.Info().Int("amount", m.amountOfWorkers).Msg("starting monitor workers")
 
 	for id := 0; id < m.amountOfWorkers; id++ {
-		go monitorWorker(ctx, id, m.workerChannel, m.errorChannel)
+		go monitorWorker(ctx, id, m.workerChannel, errorChannel)
 	}
 
 	for {
@@ -115,7 +118,7 @@ func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *Endp
 			log.Info().Int("workerId", workerId).Msg("stopping worker")
 			return
 		case r := <-workerChannel:
-			log.Info().Int("workderId", workerId).Str("endpoint", r.Endpoint).Msg("requesting")
+			log.Info().Int("workerId", workerId).Str("endpoint", r.Endpoint).Msg("requesting")
 			r.lock.Lock()
 			err := checkLiveliness(r.Endpoint)
 			if err != nil && r.requestError == nil {
@@ -156,3 +159,5 @@ func checkLiveliness(endpoint string) error {
 
 	return nil
 }
+
+var _ IHttpMonitor = (*HttpMonitor)(nil)

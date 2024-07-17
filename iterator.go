@@ -89,7 +89,7 @@ func (ri *RequestIterator) Remove(request *EndpointRequest) bool {
 
 func (ri *RequestIterator) indexOf(request *EndpointRequest) int {
 	index := slices.IndexFunc(ri.requests, func(r *EndpointRequest) bool {
-		return request.Endpoint == r.Endpoint && request.ClientId == r.ClientId
+		return request.Endpoint == r.Endpoint
 	})
 	return index
 }

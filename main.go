@@ -42,10 +42,15 @@ func main() {
 	if err != nil {
 		log.Error().Err(err).Msg("open db error")
 	}
-	defer db.Close()
+	defer func() {
+		err := db.Close()
+		if err != nil {
+			log.Error().Err(err).Msg("db close")
+		}
+	}()
 	q := monitor_db.New(db)
 
-	httpMonitor := NewHttpMonitor(config.Monitor.AmountOfWorkers, errorChannel)
+	httpMonitor := NewHttpMonitor(config.Monitor.AmountOfWorkers)
 
 	bot, botErr := NewBot(config, httpMonitor, q)
 	if botErr != nil {
@@ -136,7 +141,7 @@ func start(bot *tele.Bot, httpMonitor *HttpMonitor, q *monitor_db.Queries) conte
 	senderCtx, cancel := context.WithCancel(context.Background())
 
 	go bot.Start()
-	go httpMonitor.StartMonitor(q)
+	go httpMonitor.StartMonitor(senderCtx, q, errorChannel)
 	go SendErrorsToClients(senderCtx, bot, errorChannel)
 
 	return cancel

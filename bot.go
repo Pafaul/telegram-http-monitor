@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/mattn/go-sqlite3"
 	"github.com/rs/zerolog/log"
 	tele "gopkg.in/telebot.v3"
 	"net/url"
@@ -129,21 +132,18 @@ func addEndpointToMonitor(c tele.Context) error {
 
 	request := &EndpointRequest{
 		Endpoint: urlToAdd,
-		ClientId: c.Sender().ID,
 	}
 
-	err := _q.InsertRequest(context.Background(), monitor_db.InsertRequestParams{
-		Clientid: request.ClientId,
-		Endpoint: request.Endpoint,
-	})
-	if err != nil {
-		log.Error().
-			Int64("clientId", request.ClientId).
-			Err(err).
-			Msg("add request")
-	}
+	err := addClientSubscription(context.Background(), _q, c.Sender().ID, urlToAdd)
+	if !errors.Is(err, sqlite3.ErrConstraintUnique) {
+		if err != nil {
+			log.Error().
+				Int64("clientId", c.Sender().ID).
+				Err(err).
+				Msg("add request")
+			return c.Send("Internal error")
+		}
 
-	if _httpMonitor.RequestExists(request) {
 		return c.Send(fmt.Sprintf("url %s is already being monitored", urlToAdd))
 	}
 
@@ -154,24 +154,19 @@ func addEndpointToMonitor(c tele.Context) error {
 
 func listMonitoredEndpoints(c tele.Context) error {
 	clientId := c.Sender().ID
-	dbRequests, err := _q.GetRequestsByClientId(context.Background(), clientId)
+	monitoredEndpoints, err := _q.GetUserMonitoredEndpoints(context.Background(), clientId)
 	if err != nil {
 		log.Error().Int64("clientId", clientId).Err(err).Msg("list requests")
-		return nil
+		return c.Send("Could not retrieve your monitored endpoints, please try again later")
 	}
 
-	clientRequests := make([]EndpointRequest, len(dbRequests))
-	for i, r := range dbRequests {
-		clientRequests[i] = EndpointRequest{Endpoint: r.Endpoint, ClientId: clientId}
-	}
-
-	if len(clientRequests) == 0 {
-		return c.Send("client has no active requests")
+	if len(monitoredEndpoints) == 0 {
+		return c.Send("You don't have any active monitored endpoints")
 	}
 
 	clientMsg := "endpoints:\n"
-	for id, r := range clientRequests {
-		clientMsg += fmt.Sprintf("  %2d. %s\n", id+1, r.Endpoint)
+	for id, r := range monitoredEndpoints {
+		clientMsg += fmt.Sprintf("  %2d. %s\n", id+1, r)
 	}
 
 	return c.Send(clientMsg)
@@ -185,56 +180,24 @@ func removeMonitoredEndpoint(c tele.Context) error {
 	urlToRemove := c.Args()[0]
 	clientId := c.Sender().ID
 
-	if numeric, err := strconv.ParseInt(urlToRemove, 10, 64); err == nil {
-		amountOfEndpoints, queryErr := _q.GetClientEndpointsAmount(context.Background(), clientId)
-		if queryErr != nil {
+	if index, err := strconv.ParseInt(urlToRemove, 10, 64); err == nil {
+		urlToRemove, err = getUrlToRemoveByIndex(context.Background(), _q, clientId, index)
+		if err != nil {
 			log.Error().
 				Err(err).
 				Int64("clientId", clientId).
-				Msg("remove monitored endpoint, get endpoint amount")
-			return c.Send(fmt.Sprintf("could not load your endpoints: %s", err))
+				Msg("remove monitored endpoint, get endpoints")
+			return c.Send(fmt.Sprintf("could not remove by index, err: %s", err.Error()))
 		}
-		if numeric == 0 {
-			return c.Send("Numeric id cannot be lower than 1")
-		}
-		if numeric > amountOfEndpoints {
-			return c.Send(fmt.Sprintf("Invalid id provided, input a number from 1 to %d", amountOfEndpoints))
-		}
-
-		endpointByIndex, queryErr := _q.GetClientEndpointByIndex(context.Background(), monitor_db.GetClientEndpointByIndexParams{
-			Clientid: clientId,
-			Offset:   numeric - 1,
-		})
-		if queryErr != nil {
-			log.Error().
-				Err(err).
-				Int64("clientId", clientId).
-				Int64("numeric", numeric).
-				Msg("remove monitored endpoint, get endpoint by index")
-		}
-		urlToRemove = endpointByIndex.Endpoint
 	}
 
-	if _, err := url.ParseRequestURI(urlToRemove); err != nil {
-		return c.Send(fmt.Sprintf("error parsing provided uri: %s", err.Error()))
-	}
-
-	request := &EndpointRequest{Endpoint: urlToRemove, ClientId: clientId}
-
-	err := _q.RemoveRequest(context.Background(), monitor_db.RemoveRequestParams{
-		Clientid: request.ClientId,
-		Endpoint: request.Endpoint,
-	})
+	err := removeUserSubscription(context.Background(), _q, clientId, urlToRemove)
 	if err != nil {
 		log.Error().
-			Int64("clientId", request.ClientId).
+			Int64("clientId", c.Sender().ID).
 			Err(err).
 			Msg("remove request")
-	}
-
-	removed := _httpMonitor.RemoveRequest(request)
-	if !removed {
-		return c.Send(fmt.Sprintf("could not find requested endpoint: %s", urlToRemove))
+		return c.Send(fmt.Sprintf("Could not remove your monitored endpoint %s", urlToRemove))
 	}
 
 	return c.Send(fmt.Sprintf("removed endpoint: %s", urlToRemove))
@@ -246,21 +209,117 @@ func SendErrorsToClients(ctx context.Context, bot *tele.Bot, errorChannel <-chan
 		case <-ctx.Done():
 			return
 		case requestErr := <-errorChannel:
-			_, sendErr := bot.Send(
-				&tele.User{ID: requestErr.ClientId},
-				fmt.Sprintf(
-					"received error: %s\nfor endpoint: %s",
-					requestErr.Error.Error(),
-					requestErr.Endpoint,
-				),
-			)
-			if sendErr != nil {
+			usersToNotify, err := _q.GetUsersToNotify(ctx, requestErr.Endpoint)
+			if err != nil {
 				log.Error().
-					Int64("client", requestErr.ClientId).
-					Str("requestError", requestErr.Error.Error()).
-					Err(sendErr).
-					Msg("could not send error to client")
+					Err(err).
+					Msg("could not load users from db")
+			}
+
+			for _, client := range usersToNotify {
+				_, sendErr := bot.Send(
+					&tele.User{ID: client},
+					fmt.Sprintf(
+						"received error: %s\nfor endpoint: %s",
+						requestErr.Error.Error(),
+						requestErr.Endpoint,
+					),
+				)
+				if sendErr != nil {
+					log.Error().
+						Int64("client", client).
+						Str("requestError", requestErr.Error.Error()).
+						Err(sendErr).
+						Msg("could not send error to client")
+				}
 			}
 		}
 	}
+}
+
+func addClientSubscription(ctx context.Context, q *monitor_db.Queries, clientId int64, url string) error {
+	err := q.AddClient(ctx, clientId)
+	if err != nil {
+		return err
+	}
+
+	urlId, err := insertEndpointOrGetId(ctx, q, url)
+	if err != nil {
+		return err
+	}
+
+	err = q.AddSubscription(ctx, monitor_db.AddSubscriptionParams{
+		Clientid: sql.NullInt64{
+			Int64: clientId,
+			Valid: true,
+		},
+		Urlid: sql.NullInt64{
+			Int64: urlId,
+			Valid: true,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func insertEndpointOrGetId(ctx context.Context, q *monitor_db.Queries, url string) (int64, error) {
+	urlId, err := q.GetUrlIdToTrack(ctx, url)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if err != nil {
+		urlId, err = q.AddUrlToTrack(ctx, url)
+		if errors.Is(err, sqlite3.ErrConstraintUnique) {
+			urlId, err = q.GetUrlIdToTrack(ctx, url)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			return 0, err
+		}
+	}
+
+	return urlId, nil
+}
+
+var (
+	ErrInvalidNumericRange = errors.New("invalid numeric range")
+)
+
+func getUrlToRemoveByIndex(ctx context.Context, q *monitor_db.Queries, clientId, endpointId int64) (string, error) {
+	userMonitoredEndpoints, queryErr := q.GetUserMonitoredEndpoints(ctx, clientId)
+	if queryErr != nil {
+		return "", queryErr
+	}
+
+	if endpointId == 0 || endpointId > int64(len(userMonitoredEndpoints)) {
+		return "", ErrInvalidNumericRange
+	}
+
+	return userMonitoredEndpoints[endpointId-1], nil
+}
+
+func removeUserSubscription(ctx context.Context, q *monitor_db.Queries, clientId int64, endpoint string) error {
+	urlId, err := q.GetUrlIdToTrack(ctx, endpoint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	err = q.RemoveSubscription(ctx, monitor_db.RemoveSubscriptionParams{
+		Clientid: sql.NullInt64{
+			Int64: clientId,
+			Valid: true,
+		},
+		Urlid: sql.NullInt64{
+			Int64: urlId,
+			Valid: true,
+		},
+	})
+	return err
 }

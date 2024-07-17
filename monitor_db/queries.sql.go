@@ -10,58 +10,38 @@ import (
 	"database/sql"
 )
 
-const getAllRequests = `-- name: GetAllRequests :many
-select clientid, endpoint from requests order by clientId
+const addClient = `-- name: AddClient :exec
+insert into clients(clientId) values(?) on conflict do nothing
 `
 
-func (q *Queries) GetAllRequests(ctx context.Context) ([]Request, error) {
-	rows, err := q.db.QueryContext(ctx, getAllRequests)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Request
-	for rows.Next() {
-		var i Request
-		if err := rows.Scan(&i.Clientid, &i.Endpoint); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+func (q *Queries) AddClient(ctx context.Context, clientid int64) error {
+	_, err := q.db.ExecContext(ctx, addClient, clientid)
+	return err
 }
 
-const getClientEndpointByIndex = `-- name: GetClientEndpointByIndex :one
-select clientid, endpoint from requests where clientId = ? order by endpoint limit 1 offset ?
+const addSubscription = `-- name: AddSubscription :exec
+insert into user_url_subscription (clientId, urlId) values (?, ?)
 `
 
-type GetClientEndpointByIndexParams struct {
-	Clientid int64
-	Offset   int64
+type AddSubscriptionParams struct {
+	Clientid sql.NullInt64
+	Urlid    sql.NullInt64
 }
 
-func (q *Queries) GetClientEndpointByIndex(ctx context.Context, arg GetClientEndpointByIndexParams) (Request, error) {
-	row := q.db.QueryRowContext(ctx, getClientEndpointByIndex, arg.Clientid, arg.Offset)
-	var i Request
-	err := row.Scan(&i.Clientid, &i.Endpoint)
-	return i, err
+func (q *Queries) AddSubscription(ctx context.Context, arg AddSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, addSubscription, arg.Clientid, arg.Urlid)
+	return err
 }
 
-const getClientEndpointsAmount = `-- name: GetClientEndpointsAmount :one
-select count(*) from requests where clientId = ?
+const addUrlToTrack = `-- name: AddUrlToTrack :one
+insert into urls_to_request(url) values (?) returning id
 `
 
-func (q *Queries) GetClientEndpointsAmount(ctx context.Context, clientid int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getClientEndpointsAmount, clientid)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
+func (q *Queries) AddUrlToTrack(ctx context.Context, url string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, addUrlToTrack, url)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const getEndpointsToMonitor = `-- name: GetEndpointsToMonitor :many
@@ -91,23 +71,38 @@ func (q *Queries) GetEndpointsToMonitor(ctx context.Context) ([]UrlsToRequest, e
 	return items, nil
 }
 
-const getRequestsByClientId = `-- name: GetRequestsByClientId :many
-select clientid, endpoint from requests where clientId = ? order by endpoint
+const getUrlIdToTrack = `-- name: GetUrlIdToTrack :one
+select id from urls_to_request where url = ?
 `
 
-func (q *Queries) GetRequestsByClientId(ctx context.Context, clientid int64) ([]Request, error) {
-	rows, err := q.db.QueryContext(ctx, getRequestsByClientId, clientid)
+func (q *Queries) GetUrlIdToTrack(ctx context.Context, url string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getUrlIdToTrack, url)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getUserMonitoredEndpoints = `-- name: GetUserMonitoredEndpoints :many
+select ur.url
+from urls_to_request ur
+inner join user_url_subscription uus on ur.id = uus.urlId
+inner join clients c on uus.clientId = c.clientId
+where c.clientId = ?
+`
+
+func (q *Queries) GetUserMonitoredEndpoints(ctx context.Context, clientid int64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, getUserMonitoredEndpoints, clientid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Request
+	var items []string
 	for rows.Next() {
-		var i Request
-		if err := rows.Scan(&i.Clientid, &i.Endpoint); err != nil {
+		var url string
+		if err := rows.Scan(&url); err != nil {
 			return nil, err
 		}
-		items = append(items, i)
+		items = append(items, url)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -119,14 +114,15 @@ func (q *Queries) GetRequestsByClientId(ctx context.Context, clientid int64) ([]
 }
 
 const getUsersToNotify = `-- name: GetUsersToNotify :many
-select clients.clientId
-    from user_url_subscription
-        inner join clients on clients.clientId = user_url_subscription.clientId
-    where user_url_subscription.urlId = ?
+select c.clientId
+from clients c
+inner join user_url_subscription uus on c.clientId = uus.clientId
+inner join urls_to_request ur on uus.urlId = ur.id
+where ur.url = ?
 `
 
-func (q *Queries) GetUsersToNotify(ctx context.Context, urlid sql.NullInt64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, getUsersToNotify, urlid)
+func (q *Queries) GetUsersToNotify(ctx context.Context, url string) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, getUsersToNotify, url)
 	if err != nil {
 		return nil, err
 	}
@@ -148,30 +144,34 @@ func (q *Queries) GetUsersToNotify(ctx context.Context, urlid sql.NullInt64) ([]
 	return items, nil
 }
 
-const insertRequest = `-- name: InsertRequest :exec
-insert into requests (clientId, endpoint) values (?, ?)
+const removeClient = `-- name: RemoveClient :exec
+delete from clients where clientId = ?
 `
 
-type InsertRequestParams struct {
-	Clientid int64
-	Endpoint string
-}
-
-func (q *Queries) InsertRequest(ctx context.Context, arg InsertRequestParams) error {
-	_, err := q.db.ExecContext(ctx, insertRequest, arg.Clientid, arg.Endpoint)
+func (q *Queries) RemoveClient(ctx context.Context, clientid int64) error {
+	_, err := q.db.ExecContext(ctx, removeClient, clientid)
 	return err
 }
 
-const removeRequest = `-- name: RemoveRequest :exec
-delete from requests where clientId = ? and endpoint = ?
+const removeSubscription = `-- name: RemoveSubscription :exec
+delete from user_url_subscription where clientId = ? and urlId = ?
 `
 
-type RemoveRequestParams struct {
-	Clientid int64
-	Endpoint string
+type RemoveSubscriptionParams struct {
+	Clientid sql.NullInt64
+	Urlid    sql.NullInt64
 }
 
-func (q *Queries) RemoveRequest(ctx context.Context, arg RemoveRequestParams) error {
-	_, err := q.db.ExecContext(ctx, removeRequest, arg.Clientid, arg.Endpoint)
+func (q *Queries) RemoveSubscription(ctx context.Context, arg RemoveSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, removeSubscription, arg.Clientid, arg.Urlid)
+	return err
+}
+
+const removeUrlToTrack = `-- name: RemoveUrlToTrack :exec
+delete from urls_to_request where url = ?
+`
+
+func (q *Queries) RemoveUrlToTrack(ctx context.Context, url string) error {
+	_, err := q.db.ExecContext(ctx, removeUrlToTrack, url)
 	return err
 }
