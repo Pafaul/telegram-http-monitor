@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
@@ -27,18 +28,15 @@ type (
 		lock            sync.Mutex
 		amountOfWorkers int
 		workerChannel   chan *EndpointRequest
+		requestIterator *RequestIterator
 	}
 
 	IHttpMonitor interface {
-		StartMonitor(ctx context.Context, q *monitor_db.Queries, errorChannel chan<- RequestError)
+		StartMonitor(ctx context.Context, db *sql.DB, errorChannel chan<- RequestError)
 		AddRequest(request *EndpointRequest)
 		RemoveRequest(request *EndpointRequest) bool
 		RequestExists(request *EndpointRequest) bool
 	}
-)
-
-var (
-	requestIterator *RequestIterator
 )
 
 func NewHttpMonitor(amountOfWorkers int) *HttpMonitor {
@@ -47,22 +45,23 @@ func NewHttpMonitor(amountOfWorkers int) *HttpMonitor {
 	monitor.amountOfWorkers = amountOfWorkers
 	monitor.workerChannel = make(chan *EndpointRequest, amountOfWorkers)
 
-	requestIterator = NewRequestIterator(amountOfWorkers)
+	monitor.requestIterator = NewRequestIterator(amountOfWorkers)
 
 	return monitor
 }
 
-func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, errorChannel chan<- RequestError) {
+func (m *HttpMonitor) StartMonitor(ctx context.Context, db *sql.DB, errorChannel chan<- RequestError) {
+	q := monitor_db.New(db)
 	requests, _ := q.GetEndpointsToMonitor(context.Background())
 	for _, r := range requests {
-		requestIterator.Add(&EndpointRequest{
+		m.requestIterator.Add(&EndpointRequest{
 			Endpoint:     r.Url,
 			lock:         &sync.Mutex{},
 			requestError: nil,
 		})
 	}
 
-	go requestIterator.Start(ctx)
+	go m.requestIterator.Start(ctx)
 
 	log.Info().Int("amount", m.amountOfWorkers).Msg("starting monitor workers")
 
@@ -76,7 +75,7 @@ func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, e
 	}
 
 	for {
-		r, ok := <-requestIterator.ReceiveChannel
+		r, ok := <-m.requestIterator.ReceiveChannel
 		if !ok {
 			log.Warn().Msg("request iterator has closed the channel")
 			return
@@ -96,15 +95,15 @@ func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, e
 
 func (m *HttpMonitor) AddRequest(request *EndpointRequest) {
 	request.lock = &sync.Mutex{}
-	requestIterator.Add(request)
+	m.requestIterator.Add(request)
 }
 
 func (m *HttpMonitor) RemoveRequest(request *EndpointRequest) bool {
-	return requestIterator.Remove(request)
+	return m.requestIterator.Remove(request)
 }
 
 func (m *HttpMonitor) RequestExists(request *EndpointRequest) bool {
-	return requestIterator.RequestExists(request)
+	return m.requestIterator.RequestExists(request)
 }
 
 func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *EndpointRequest, updateChannel chan<- RequestError) {
@@ -118,7 +117,7 @@ func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *Endp
 		case r := <-workerChannel:
 			log.Info().Int("workerId", workerId).Str("endpoint", r.Endpoint).Msg("requesting")
 			r.lock.Lock()
-			err := checkLiveliness(r.Endpoint)
+			err := checkLiveliness(http.DefaultClient, r.Endpoint)
 			if err != nil && r.requestError == nil {
 				r.requestError = err
 				updateChannel <- RequestError{
@@ -135,7 +134,7 @@ func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *Endp
 	}
 }
 
-func checkLiveliness(endpoint string) error {
+func checkLiveliness(client *http.Client, endpoint string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(5))
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -143,7 +142,7 @@ func checkLiveliness(endpoint string) error {
 		return err
 	}
 
-	res, err := http.DefaultClient.Do(request)
+	res, err := client.Do(request)
 	if err != nil {
 		return err
 	}

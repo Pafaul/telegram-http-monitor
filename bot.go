@@ -20,6 +20,11 @@ type (
 		command tele.Command
 		handler tele.HandlerFunc
 	}
+
+	BotStorage struct {
+		httpMonitor *HttpMonitor
+		q           *monitor_db.Queries
+	}
 )
 
 var (
@@ -48,11 +53,10 @@ var (
 )
 
 var (
-	_httpMonitor *HttpMonitor
-	_q           *monitor_db.Queries
+	botStorage BotStorage
 )
 
-func NewBot(config *Config, monitor *HttpMonitor, q *monitor_db.Queries) (*tele.Bot, error) {
+func NewBot(config *Config, monitor *HttpMonitor, db *sql.DB) (*tele.Bot, error) {
 	botSettings := tele.Settings{
 		Token:  config.Token,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
@@ -74,8 +78,8 @@ func NewBot(config *Config, monitor *HttpMonitor, q *monitor_db.Queries) (*tele.
 	setupBotMiddleware(bot)
 	setupBotHandlers(bot)
 
-	_httpMonitor = monitor
-	_q = q
+	botStorage.httpMonitor = monitor
+	botStorage.q = monitor_db.New(db)
 
 	return bot, nil
 }
@@ -123,7 +127,8 @@ func addEndpointToMonitor(c tele.Context) error {
 	urlToAdd := c.Args()[0]
 	_, urlErr := url.ParseRequestURI(urlToAdd)
 	if urlErr != nil {
-		return c.Send(urlErr.Error())
+		log.Error().Str("url", urlToAdd).Err(urlErr).Msg("parse url")
+		return c.Send(fmt.Sprintf("provided endpoint: %s is not a valid url", urlToAdd))
 	}
 
 	if !strings.HasPrefix(urlToAdd, "http") {
@@ -134,7 +139,7 @@ func addEndpointToMonitor(c tele.Context) error {
 		Endpoint: urlToAdd,
 	}
 
-	err := addClientSubscription(context.Background(), _q, c.Sender().ID, urlToAdd)
+	err := addClientSubscription(context.Background(), botStorage.q, c.Sender().ID, urlToAdd)
 	if err != nil {
 		if !errors.Is(err, sqlite3.ErrConstraintUnique) {
 			return c.Send(fmt.Sprintf("url %s is already being monitored", urlToAdd))
@@ -146,14 +151,14 @@ func addEndpointToMonitor(c tele.Context) error {
 		return c.Send("Internal error")
 	}
 
-	_httpMonitor.AddRequest(request)
+	botStorage.httpMonitor.AddRequest(request)
 
 	return c.Send(fmt.Sprintf("Endpoint %s added to monitoring", urlToAdd))
 }
 
 func listMonitoredEndpoints(c tele.Context) error {
 	clientId := c.Sender().ID
-	monitoredEndpoints, err := _q.GetUserMonitoredEndpoints(context.Background(), clientId)
+	monitoredEndpoints, err := botStorage.q.GetUserMonitoredEndpoints(context.Background(), clientId)
 	if err != nil {
 		log.Error().Int64("clientId", clientId).Err(err).Msg("list requests")
 		return c.Send("Could not retrieve your monitored endpoints, please try again later")
@@ -180,7 +185,7 @@ func removeMonitoredEndpoint(c tele.Context) error {
 	clientId := c.Sender().ID
 
 	if index, err := strconv.ParseInt(urlToRemove, 10, 64); err == nil {
-		urlToRemove, err = getUrlToRemoveByIndex(context.Background(), _q, clientId, index)
+		urlToRemove, err = getUrlToRemoveByIndex(context.Background(), botStorage.q, clientId, index)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -190,7 +195,7 @@ func removeMonitoredEndpoint(c tele.Context) error {
 		}
 	}
 
-	err := removeUserSubscription(context.Background(), _q, clientId, urlToRemove)
+	err := removeUserSubscription(context.Background(), botStorage.q, clientId, urlToRemove)
 	if err != nil {
 		log.Error().
 			Int64("clientId", c.Sender().ID).
@@ -208,7 +213,7 @@ func SendErrorsToClients(ctx context.Context, bot *tele.Bot, errorChannel <-chan
 		case <-ctx.Done():
 			return
 		case requestErr := <-errorChannel:
-			usersToNotify, err := _q.GetUsersToNotify(ctx, requestErr.Endpoint)
+			usersToNotify, err := botStorage.q.GetUsersToNotify(ctx, requestErr.Endpoint)
 			if err != nil {
 				log.Error().
 					Err(err).
