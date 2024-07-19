@@ -25,7 +25,6 @@ type (
 
 	HttpMonitor struct {
 		lock            sync.Mutex
-		cancel          context.CancelFunc
 		amountOfWorkers int
 		workerChannel   chan *EndpointRequest
 	}
@@ -54,9 +53,6 @@ func NewHttpMonitor(amountOfWorkers int) *HttpMonitor {
 }
 
 func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, errorChannel chan<- RequestError) {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
-
 	requests, _ := q.GetEndpointsToMonitor(context.Background())
 	for _, r := range requests {
 		requestIterator.Add(&EndpointRequest{
@@ -70,8 +66,13 @@ func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, e
 
 	log.Info().Int("amount", m.amountOfWorkers).Msg("starting monitor workers")
 
+	var wg sync.WaitGroup
 	for id := 0; id < m.amountOfWorkers; id++ {
-		go monitorWorker(ctx, id, m.workerChannel, errorChannel)
+		go func(id int) {
+			wg.Add(1)
+			monitorWorker(ctx, id, m.workerChannel, errorChannel)
+			wg.Done()
+		}(id)
 	}
 
 	for {
@@ -83,6 +84,7 @@ func (m *HttpMonitor) StartMonitor(ctx context.Context, q *monitor_db.Queries, e
 
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			close(m.workerChannel)
 			return
 		default:
@@ -103,10 +105,6 @@ func (m *HttpMonitor) RemoveRequest(request *EndpointRequest) bool {
 
 func (m *HttpMonitor) RequestExists(request *EndpointRequest) bool {
 	return requestIterator.RequestExists(request)
-}
-
-func (m *HttpMonitor) StopMonitor() {
-	m.cancel()
 }
 
 func monitorWorker(ctx context.Context, workerId int, workerChannel <-chan *EndpointRequest, updateChannel chan<- RequestError) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"pafaul/telegram-http-monitor/monitor_db"
+	"sync"
 )
 
 type (
@@ -23,10 +24,6 @@ type (
 			AmountOfWorkers int `yaml:"amountOfWorkers"`
 		} `yaml:"monitor"`
 	}
-)
-
-var (
-	errorChannel = make(chan RequestError)
 )
 
 func main() {
@@ -58,11 +55,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	cancel := start(bot, httpMonitor, q)
+	errorChannel := make(chan RequestError)
+	cancel, wg := start(bot, httpMonitor, q, errorChannel)
 
 	sigKill := make(chan os.Signal, 1)
 	signal.Notify(sigKill, os.Interrupt)
-	blocker := make(chan int)
 	go func() {
 		select {
 		case s := <-sigKill:
@@ -70,16 +67,11 @@ func main() {
 			log.Warn().Str("signal", s.String()).Msg("sigkill received")
 			log.Info().Msg("stopping bot")
 			bot.Stop()
-
-			log.Info().Msg("stopping http monitor")
-			httpMonitor.StopMonitor()
 			close(errorChannel)
-
-			blocker <- 1
 		}
 	}()
 
-	<-blocker
+	wg.Wait()
 }
 
 func loadConfig(configFile string) (*Config, error) {
@@ -137,12 +129,26 @@ func openDBConnection(config *Config) (*sql.DB, error) {
 	return db, nil
 }
 
-func start(bot *tele.Bot, httpMonitor *HttpMonitor, q *monitor_db.Queries) context.CancelFunc {
+func start(bot *tele.Bot, httpMonitor *HttpMonitor, q *monitor_db.Queries, errorChannel chan RequestError) (context.CancelFunc, *sync.WaitGroup) {
 	senderCtx, cancel := context.WithCancel(context.Background())
 
-	go bot.Start()
-	go httpMonitor.StartMonitor(senderCtx, q, errorChannel)
-	go SendErrorsToClients(senderCtx, bot, errorChannel)
+	var wg sync.WaitGroup
+	wg.Add(3)
 
-	return cancel
+	go func(wg *sync.WaitGroup) {
+		bot.Start()
+		wg.Done()
+	}(&wg)
+
+	go func(wg *sync.WaitGroup) {
+		httpMonitor.StartMonitor(senderCtx, q, errorChannel)
+		wg.Done()
+	}(&wg)
+
+	go func(wg *sync.WaitGroup) {
+		SendErrorsToClients(senderCtx, bot, errorChannel)
+		wg.Done()
+	}(&wg)
+
+	return cancel, &wg
 }
