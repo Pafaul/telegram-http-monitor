@@ -135,16 +135,15 @@ func addEndpointToMonitor(c tele.Context) error {
 	}
 
 	err := addClientSubscription(context.Background(), _q, c.Sender().ID, urlToAdd)
-	if !errors.Is(err, sqlite3.ErrConstraintUnique) {
-		if err != nil {
-			log.Error().
-				Int64("clientId", c.Sender().ID).
-				Err(err).
-				Msg("add request")
-			return c.Send("Internal error")
+	if err != nil {
+		if !errors.Is(err, sqlite3.ErrConstraintUnique) {
+			return c.Send(fmt.Sprintf("url %s is already being monitored", urlToAdd))
 		}
-
-		return c.Send(fmt.Sprintf("url %s is already being monitored", urlToAdd))
+		log.Error().
+			Int64("clientId", c.Sender().ID).
+			Err(err).
+			Msg("add request")
+		return c.Send("Internal error")
 	}
 
 	_httpMonitor.AddRequest(request)
@@ -277,7 +276,8 @@ func insertEndpointOrGetId(ctx context.Context, q *monitor_db.Queries, url strin
 			if err != nil {
 				return 0, err
 			}
-		} else {
+		}
+		if err != nil {
 			return 0, err
 		}
 	}
